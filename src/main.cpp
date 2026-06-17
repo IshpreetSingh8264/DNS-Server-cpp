@@ -85,6 +85,9 @@ struct DnsPacket {
     std::vector<DnsRecord> additionals;
 };
 
+// Oye forward declaration, makeARecord nu pehlan hi bula lo. (Forward declaration to keep compiler chill.)
+DnsRecord makeARecord(const std::string& name, const std::string& ip, uint32_t ttl = 60);
+
 // Oye label splitter, dots nu tod ke jalebi bana rahe haan. (Splitting dotted names like jalebi spirals.)
 std::vector<std::string> splitLabels(const std::string& name) {
     std::vector<std::string> labels;
