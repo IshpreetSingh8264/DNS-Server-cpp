@@ -332,7 +332,7 @@ std::vector<uint8_t> buildSyntheticAnswer(const DnsPacket& query, const std::str
 }
 
 // Oye quick helper to craft A record for friendly testing. (Helper to craft a friendly A record.)
-DnsRecord makeARecord(const std::string& name, const std::string& ip, uint32_t ttl = 60) {
+DnsRecord makeARecord(const std::string& name, const std::string& ip, uint32_t ttl) {
     DnsRecord r;
     r.name = name;
     r.type = 1;      // A
