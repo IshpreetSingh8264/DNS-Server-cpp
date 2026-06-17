@@ -1,36 +1,39 @@
 [![progress-banner](https://backend.codecrafters.io/progress/dns-server/128adc62-216f-4b72-be5f-1114381281d9)](https://app.codecrafters.io/users/codecrafters-bot?r=2qF)
 
-This is a starting point for C++ solutions to the
+Welcome to the **Pinglish-powered DNS server** built for the
 ["Build Your Own DNS server" Challenge](https://app.codecrafters.io/courses/dns-server/overview).
 
-In this challenge, you'll build a DNS server that's capable of parsing and
-creating DNS packets, responding to DNS queries, handling various record types
-and doing recursive resolve. Along the way we'll learn about the DNS protocol,
-DNS packet format, root servers, authoritative servers, forwarding servers,
-various record types (A, AAAA, CNAME, etc) and more.
+## Introduction
+- A full UDP DNS forwarder with local override for `codecrafters.io`, compression parsing, and SERVFAIL fallback.
+- All logic lives in [src/main.cpp](src/main.cpp); comments are Pinglish plus playful English translations.
 
-**Note**: If you're viewing this repo on GitHub, head over to
-[codecrafters.io](https://codecrafters.io) to try the challenge.
+## Repository Setup
+- Requirements: `cmake`, `g++` (C++17), and a Linux-y socket stack.
+- Run `./your_program.sh` to build and start the server on UDP `2053`.
 
-# Passing the first stage
+## Setup UDP Server
+- The server binds `0.0.0.0:2053` with `SO_REUSEPORT` so restarts stay smooth.
+- Main loop receives packets, parses, and replies immediately.
 
-The entry point for your `your_program.sh` implementation is in `src/main.cpp`.
-Study and uncomment the relevant code, and push your changes to pass the first
-stage:
+## Write header/question/answer sections
+- `DnsHeader`, `DnsQuestion`, and `DnsRecord` structs capture every field.
+- Encode/decode helpers read/write network byte order, ensuring flags and counts stay correct.
 
+## Parse header/question/compressed packet
+- `parsePacket()` walks header, questions, answers, authority, and additional sections.
+- `parseName()` understands compressed labels (pointer handling with loop protection).
+
+## Forwarding Server
+- Queries try local override first (`codecrafters.io` → `8.8.8.8`).
+- Otherwise packets forward to upstream resolver `8.8.8.8:53` with a 1.5s timeout; failures fall back to SERVFAIL.
+
+## Running locally
 ```sh
-git commit -am "pass 1st stage" # any msg
-git push origin master
+./your_program.sh
+# Then, from another shell:
+dig @127.0.0.1 -p 2053 codecrafters.io A
 ```
 
-Time to move on to the next stage!
-
-# Stage 2 & beyond
-
-Note: This section is for stages 2 and beyond.
-
-1. Ensure you have `cmake` installed locally
-1. Run `./your_program.sh` to run your program, which is implemented in
-   `src/main.cpp`.
-1. Commit your changes and run `git push origin master` to submit your solution
-   to CodeCrafters. Test output will be streamed to your terminal.
+## Notes
+- Packet size capped at 512 bytes (classic DNS over UDP limit).
+- Output is auto-flushed to keep logs visible in Codecrafters runner.
