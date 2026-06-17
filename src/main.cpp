@@ -319,8 +319,8 @@ std::vector<uint8_t> buildSyntheticAnswer(const DnsPacket& query, const std::str
     resp.questions = query.questions;
     resp.header.qdCount = static_cast<uint16_t>(resp.questions.size());
 
-    if (!query.questions.empty()) {
-        const auto& q = query.questions.front();
+    // Oye sare questions da jawab dena, koi chhadna nahi. (Answer all questions, leave none behind.)
+    for (const auto& q : query.questions) {
         if (q.qtype == 1 && q.qclass == 1) {
             resp.answers.push_back(makeARecord(q.qname, ip, 60));
         }
@@ -480,6 +480,9 @@ int main() {
                 response = buildHeaderOnlyReply(packet);
             } else if (auto local = tryLocalAnswer(packet)) {
                 response = local;
+            } else if (packet.header.qdCount > 1) {
+                // Oye multiple questions, apni factory khol rahe. (Multiple questions, running our own factory.)
+                response = buildSyntheticAnswer(packet);
             } else {
                 response = forwardToUpstream(request.data(), request.size());
                 if (!response) {
