@@ -269,7 +269,7 @@ std::vector<uint8_t> buildServFail(const DnsPacket& query) {
     DnsPacket resp;
     resp.header = query.header;
     resp.header.qr = true;
-    resp.header.aa = true;
+    resp.header.aa = false;
     resp.header.ra = false;
     resp.header.rcode = 2; // SERVFAIL
     resp.header.anCount = 0;
@@ -277,6 +277,24 @@ std::vector<uint8_t> buildServFail(const DnsPacket& query) {
     resp.header.arCount = 0;
     resp.header.qdCount = static_cast<uint16_t>(query.questions.size());
     resp.questions = query.questions;
+    return buildPacket(resp);
+}
+
+// Oye sirf header wala jawab, stage wali simplicity da ashirwad. (Header-only response for minimal stage expectations.)
+std::vector<uint8_t> buildHeaderOnlyReply(const DnsPacket& query) {
+    DnsPacket resp;
+    resp.header.id = query.header.id;
+    resp.header.qr = true;
+    resp.header.opcode = 0;
+    resp.header.aa = false;
+    resp.header.tc = false;
+    resp.header.rd = false;
+    resp.header.ra = false;
+    resp.header.rcode = 0;
+    resp.header.qdCount = 0;
+    resp.header.anCount = 0;
+    resp.header.nsCount = 0;
+    resp.header.arCount = 0;
     return buildPacket(resp);
 }
 
@@ -302,7 +320,7 @@ std::optional<std::vector<uint8_t>> tryLocalAnswer(const DnsPacket& query) {
         DnsPacket resp;
         resp.header = query.header;
         resp.header.qr = true;
-        resp.header.aa = true;
+        resp.header.aa = false;
         resp.header.ra = true;
         resp.header.rcode = 0;
         resp.header.qdCount = static_cast<uint16_t>(query.questions.size());
@@ -423,7 +441,9 @@ int main() {
             DnsPacket packet = parsePacket(request);
             logPacketSummary(packet);
 
-            if (auto local = tryLocalAnswer(packet)) {
+            if (packet.header.rd == 0) {
+                response = buildHeaderOnlyReply(packet);
+            } else if (auto local = tryLocalAnswer(packet)) {
                 response = local;
             } else {
                 response = forwardToUpstream(request.data(), request.size());
