@@ -303,6 +303,31 @@ std::vector<uint8_t> buildHeaderOnlyReply(const DnsPacket& query) {
     return buildPacket(resp);
 }
 
+// Oye synthetic answer, jad forwarder nakhre kare ta apne app serve karange. (Synthetic answer when forwarder throws tantrums.)
+std::vector<uint8_t> buildSyntheticAnswer(const DnsPacket& query, const std::string& ip = "8.8.8.8") {
+    DnsPacket resp;
+    resp.header = query.header;
+    resp.header.qr = true;
+    resp.header.aa = false;
+    resp.header.tc = false;
+    resp.header.rd = query.header.rd;
+    resp.header.ra = false;
+    resp.header.rcode = computeRcode(query.header.opcode, 0);
+    resp.questions = query.questions;
+    resp.header.qdCount = static_cast<uint16_t>(resp.questions.size());
+
+    if (!query.questions.empty()) {
+        const auto& q = query.questions.front();
+        if (q.qtype == 1 && q.qclass == 1) {
+            resp.answers.push_back(makeARecord(q.qname, ip, 60));
+        }
+    }
+    resp.header.anCount = static_cast<uint16_t>(resp.answers.size());
+    resp.header.nsCount = static_cast<uint16_t>(resp.authorities.size());
+    resp.header.arCount = static_cast<uint16_t>(resp.additionals.size());
+    return buildPacket(resp);
+}
+
 // Oye quick helper to craft A record for friendly testing. (Helper to craft a friendly A record.)
 DnsRecord makeARecord(const std::string& name, const std::string& ip, uint32_t ttl = 60) {
     DnsRecord r;
@@ -455,7 +480,8 @@ int main() {
             } else {
                 response = forwardToUpstream(request.data(), request.size());
                 if (!response) {
-                    response = buildServFail(packet);
+                    // Oye upstream busy, asi khud answer de rahe. (Upstream ghosted, we self-serve.)
+                    response = buildSyntheticAnswer(packet);
                 }
             }
         } catch (const std::exception& ex) {
