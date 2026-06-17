@@ -21,6 +21,11 @@ constexpr const char* kUpstreamResolver = "8.8.8.8"; // Default Google DNS
 constexpr int kUpstreamPort = 53;
 constexpr int kSocketTimeoutMs = 1500;
 
+// Oye opcode di izzat rakho, rcode naal sauda thik karo. (Respect opcode, set rcode accordingly.)
+uint8_t computeRcode(uint8_t opcode, uint8_t fallback = 0) {
+    return opcode == 0 ? fallback : 4; // 4 => Not Implemented when non-standard opcode
+}
+
 // Oye safe casting helper, bhulekhe vich overflow na ho jaave. (Guarding against goofy overflow surprises.)
 template <typename T>
 T readUInt(const std::vector<uint8_t>& data, size_t& offset) {
@@ -271,7 +276,7 @@ std::vector<uint8_t> buildServFail(const DnsPacket& query) {
     resp.header.qr = true;
     resp.header.aa = false;
     resp.header.ra = false;
-    resp.header.rcode = 2; // SERVFAIL
+    resp.header.rcode = computeRcode(query.header.opcode, 2); // SERVFAIL unless opcode demands Not Implemented
     resp.header.anCount = 0;
     resp.header.nsCount = 0;
     resp.header.arCount = 0;
@@ -285,12 +290,12 @@ std::vector<uint8_t> buildHeaderOnlyReply(const DnsPacket& query) {
     DnsPacket resp;
     resp.header.id = query.header.id;
     resp.header.qr = true;
-    resp.header.opcode = 0;
+    resp.header.opcode = query.header.opcode;
     resp.header.aa = false;
     resp.header.tc = false;
-    resp.header.rd = false;
+    resp.header.rd = query.header.rd;
     resp.header.ra = false;
-    resp.header.rcode = 0;
+    resp.header.rcode = computeRcode(query.header.opcode, 0);
     resp.header.qdCount = 0;
     resp.header.anCount = 0;
     resp.header.nsCount = 0;
@@ -321,8 +326,8 @@ std::optional<std::vector<uint8_t>> tryLocalAnswer(const DnsPacket& query) {
         resp.header = query.header;
         resp.header.qr = true;
         resp.header.aa = false;
-        resp.header.ra = true;
-        resp.header.rcode = 0;
+        resp.header.ra = false;
+        resp.header.rcode = computeRcode(query.header.opcode, 0);
         resp.header.qdCount = static_cast<uint16_t>(query.questions.size());
         resp.questions = query.questions;
         resp.answers.push_back(makeARecord(q.qname, "8.8.8.8", 300));
@@ -441,7 +446,9 @@ int main() {
             DnsPacket packet = parsePacket(request);
             logPacketSummary(packet);
 
-            if (packet.header.rd == 0) {
+            if (packet.header.opcode != 0) {
+                response = buildHeaderOnlyReply(packet);
+            } else if (packet.header.rd == 0) {
                 response = buildHeaderOnlyReply(packet);
             } else if (auto local = tryLocalAnswer(packet)) {
                 response = local;
