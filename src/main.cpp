@@ -17,9 +17,11 @@ namespace {
 // Oye baselines set kar rahe haan, code nu pad ke muskaan aayegi. (Setting stage for fun yet serious DNS antics.)
 constexpr int kDnsPort = 2053;
 constexpr size_t kMaxPacketSize = 512; // DNS classic limit
-constexpr const char* kUpstreamResolver = "8.8.8.8"; // Default Google DNS
 constexpr int kUpstreamPort = 53;
 constexpr int kSocketTimeoutMs = 1500;
+
+// Oye global resolver, runtime te badal sakde. (Global resolver that can be swapped at runtime.)
+std::string g_upstreamResolver = "8.8.8.8";
 
 // Oye opcode di izzat rakho, rcode naal sauda thik karo. (Respect opcode, set rcode accordingly.)
 uint8_t computeRcode(uint8_t opcode, uint8_t fallback = 0) {
@@ -345,6 +347,10 @@ DnsRecord makeARecord(const std::string& name, const std::string& ip, uint32_t t
 
 // Oye local override da option, koi khaas domain ho ta turant jawab. (Local override for VIP domains.)
 std::optional<std::vector<uint8_t>> tryLocalAnswer(const DnsPacket& query) {
+    // Oye local override sirf default resolver te, forwarding wale mode vich nahi. (Local override only when using default resolver, not in forwarding mode.)
+    if (g_upstreamResolver != "8.8.8.8") {
+        return std::nullopt;
+    }
     if (query.questions.empty()) {
         return std::nullopt;
     }
@@ -382,7 +388,7 @@ std::optional<std::vector<uint8_t>> forwardToUpstream(const uint8_t* data, size_
     sockaddr_in upstream{};
     upstream.sin_family = AF_INET;
     upstream.sin_port = htons(kUpstreamPort);
-    inet_pton(AF_INET, kUpstreamResolver, &upstream.sin_addr);
+    inet_pton(AF_INET, g_upstreamResolver.c_str(), &upstream.sin_addr);
 
     ssize_t sent = sendto(sock, data, length, 0, reinterpret_cast<sockaddr*>(&upstream), sizeof(upstream));
     if (sent < 0) {
@@ -442,11 +448,26 @@ void logPacketSummary(const DnsPacket& packet) {
 
 } // namespace
 
-int main() {
+int main(int argc, char* argv[]) {
     // Oye stdout flush on, taaki logs jaldi nikal jaan. (Auto flush so logs sprint out.)
     std::cout << std::unitbuf;
     std::cerr << std::unitbuf;
     setbuf(stdout, nullptr);
+
+    // Oye command-line arguments, resolver nu pakad rahe. (Parsing command-line args to grab resolver.)
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--resolver" && i + 1 < argc) {
+            std::string resolverAddr = argv[i + 1];
+            auto colonPos = resolverAddr.find(':');
+            if (colonPos != std::string::npos) {
+                g_upstreamResolver = resolverAddr.substr(0, colonPos);
+            } else {
+                g_upstreamResolver = resolverAddr;
+            }
+            ++i;
+        }
+    }
 
     // Oye server socket te dhyaan, bina isde kahani hi adhuri. (Server socket is the hero of this story.)
     int serverSocket = createServerSocket();
