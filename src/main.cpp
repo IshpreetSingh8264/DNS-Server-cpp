@@ -17,11 +17,11 @@ namespace {
 // Oye baselines set kar rahe haan, code nu pad ke muskaan aayegi. (Setting stage for fun yet serious DNS antics.)
 constexpr int kDnsPort = 2053;
 constexpr size_t kMaxPacketSize = 512; // DNS classic limit
-constexpr int kUpstreamPort = 53;
 constexpr int kSocketTimeoutMs = 1500;
 
 // Oye global resolver, runtime te badal sakde. (Global resolver that can be swapped at runtime.)
 std::string g_upstreamResolver = "8.8.8.8";
+int g_upstreamPort = 53;
 
 // Oye opcode di izzat rakho, rcode naal sauda thik karo. (Respect opcode, set rcode accordingly.)
 uint8_t computeRcode(uint8_t opcode, uint8_t fallback = 0) {
@@ -387,7 +387,7 @@ std::optional<std::vector<uint8_t>> forwardToUpstream(const uint8_t* data, size_
 
     sockaddr_in upstream{};
     upstream.sin_family = AF_INET;
-    upstream.sin_port = htons(kUpstreamPort);
+    upstream.sin_port = htons(g_upstreamPort);
     inet_pton(AF_INET, g_upstreamResolver.c_str(), &upstream.sin_addr);
 
     ssize_t sent = sendto(sock, data, length, 0, reinterpret_cast<sockaddr*>(&upstream), sizeof(upstream));
@@ -462,8 +462,10 @@ int main(int argc, char* argv[]) {
             auto colonPos = resolverAddr.find(':');
             if (colonPos != std::string::npos) {
                 g_upstreamResolver = resolverAddr.substr(0, colonPos);
+                g_upstreamPort = std::stoi(resolverAddr.substr(colonPos + 1));
             } else {
                 g_upstreamResolver = resolverAddr;
+                g_upstreamPort = 53;
             }
             ++i;
         }
@@ -527,6 +529,9 @@ int main(int argc, char* argv[]) {
         }
 
         if (response && !response->empty()) {
+            char addrStr[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &clientAddress.sin_addr, addrStr, INET_ADDRSTRLEN);
+            std::cerr << "Sending to " << addrStr << ":" << ntohs(clientAddress.sin_port) << std::endl;
             ssize_t sent = sendto(serverSocket, response->data(), response->size(), 0,
                                   reinterpret_cast<sockaddr*>(&clientAddress), clientAddrLen);
             if (sent < 0) {
