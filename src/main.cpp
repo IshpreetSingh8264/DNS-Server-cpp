@@ -476,11 +476,11 @@ int main(int argc, char* argv[]) {
     }
 
     sockaddr_in clientAddress{};
-    socklen_t clientAddrLen = sizeof(clientAddress);
     std::vector<uint8_t> buffer(kMaxPacketSize + 1);
 
     // Oye infinite loop, DNS seva 24x7. (Service loop, dhaba open 24x7.)
     while (true) {
+        socklen_t clientAddrLen = sizeof(clientAddress);  // Oye har baar reset, address corruption na ho. (Reset each time to avoid address corruption.)
         ssize_t bytesRead = recvfrom(serverSocket, buffer.data(), kMaxPacketSize, 0,
                                      reinterpret_cast<sockaddr*>(&clientAddress), &clientAddrLen);
         if (bytesRead <= 0) {
@@ -508,7 +508,10 @@ int main(int argc, char* argv[]) {
                 response = forwardToUpstream(request.data(), request.size());
                 if (!response) {
                     // Oye upstream busy, asi khud answer de rahe. (Upstream ghosted, we self-serve.)
+                    std::cerr << "Forwarding failed, using synthetic answer" << std::endl;
                     response = buildSyntheticAnswer(packet);
+                } else {
+                    std::cerr << "Forwarding succeeded, got " << response->size() << " bytes" << std::endl;
                 }
             }
         } catch (const std::exception& ex) {
@@ -528,7 +531,11 @@ int main(int argc, char* argv[]) {
                                   reinterpret_cast<sockaddr*>(&clientAddress), clientAddrLen);
             if (sent < 0) {
                 std::cerr << "Failed to send response: " << strerror(errno) << std::endl;
+            } else {
+                std::cerr << "Sent " << sent << " bytes successfully" << std::endl;
             }
+        } else {
+            std::cerr << "No response to send!" << std::endl;
         }
     }
 
