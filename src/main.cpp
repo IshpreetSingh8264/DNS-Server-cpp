@@ -12,6 +12,10 @@
 #include <utility>
 #include <vector>
 
+#include "protocol/names.hpp"
+#include "types/message.hpp"
+#include "utils/bytes.hpp"
+
 namespace {
 
 // Oye baselines set kar rahe haan, code nu pad ke muskaan aayegi. (Setting stage for fun yet serious DNS antics.)
@@ -23,131 +27,18 @@ constexpr int kSocketTimeoutMs = 1500;
 std::string g_upstreamResolver = "8.8.8.8";
 int g_upstreamPort = 53;
 
+using dns::DnsHeader;
+using dns::DnsPacket;
+using dns::DnsQuestion;
+using dns::DnsRecord;
+
 // Oye opcode di izzat rakho, rcode naal sauda thik karo. (Respect opcode, set rcode accordingly.)
 uint8_t computeRcode(uint8_t opcode, uint8_t fallback = 0) {
     return opcode == 0 ? fallback : 4; // 4 => Not Implemented when non-standard opcode
 }
 
-// Oye safe casting helper, bhulekhe vich overflow na ho jaave. (Guarding against goofy overflow surprises.)
-template <typename T>
-T readUInt(const std::vector<uint8_t>& data, size_t& offset) {
-    if (offset + sizeof(T) > data.size()) {
-        throw std::runtime_error("Buffer underrun while reading integer");
-    }
-    T value = 0;
-    for (size_t i = 0; i < sizeof(T); ++i) {
-        value = static_cast<T>((value << 8) | data[offset + i]);
-    }
-    offset += sizeof(T);
-    return value;
-}
-
-// Oye writer helper, byte-by-byte love letter bhej rahe haan. (Writing integers as a byte love letter.)
-template <typename T>
-void writeUInt(std::vector<uint8_t>& out, T value) {
-    for (int i = sizeof(T) - 1; i >= 0; --i) {
-        out.push_back(static_cast<uint8_t>((value >> (i * 8)) & 0xFF));
-    }
-}
-
-struct DnsHeader {
-    uint16_t id{};
-    bool qr{};
-    uint8_t opcode{};
-    bool aa{};
-    bool tc{};
-    bool rd{};
-    bool ra{};
-    uint8_t rcode{};
-    uint16_t qdCount{};
-    uint16_t anCount{};
-    uint16_t nsCount{};
-    uint16_t arCount{};
-};
-
-struct DnsQuestion {
-    std::string qname;
-    uint16_t qtype{};
-    uint16_t qclass{};
-};
-
-struct DnsRecord {
-    std::string name;
-    uint16_t type{};
-    uint16_t rclass{};
-    uint32_t ttl{};
-    std::vector<uint8_t> rdata;
-};
-
-struct DnsPacket {
-    DnsHeader header;
-    std::vector<DnsQuestion> questions;
-    std::vector<DnsRecord> answers;
-    std::vector<DnsRecord> authorities;
-    std::vector<DnsRecord> additionals;
-};
-
 // Oye forward declaration, makeARecord nu pehlan hi bula lo. (Forward declaration to keep compiler chill.)
 DnsRecord makeARecord(const std::string& name, const std::string& ip, uint32_t ttl = 60);
-
-// Oye label splitter, dots nu tod ke jalebi bana rahe haan. (Splitting dotted names like jalebi spirals.)
-std::vector<std::string> splitLabels(const std::string& name) {
-    std::vector<std::string> labels;
-    std::stringstream ss(name);
-    std::string part;
-    while (std::getline(ss, part, '.')) {
-        if (!part.empty()) {
-            labels.push_back(part);
-        }
-    }
-    return labels;
-}
-
-// Oye DNS naam parse kar rahe, compression de nakhre vi sambhal rahe. (Parsing DNS names while babysitting compression drama.)
-std::string parseName(const std::vector<uint8_t>& data, size_t& offset, int depth = 0) {
-    if (depth > 20) {
-        throw std::runtime_error("Name compression loop detected");
-    }
-    std::string name;
-    while (offset < data.size()) {
-        uint8_t len = data[offset];
-        if ((len & 0xC0) == 0xC0) {
-            if (offset + 1 >= data.size()) {
-                throw std::runtime_error("Incomplete compression pointer");
-            }
-            uint16_t ptr = static_cast<uint16_t>(((len & 0x3F) << 8) | data[offset + 1]);
-            offset += 2;
-            size_t newOffset = ptr;
-            std::string suffix = parseName(data, newOffset, depth + 1);
-            name += suffix;
-            return name;
-        }
-        if (len == 0) {
-            offset += 1;
-            break;
-        }
-        offset += 1;
-        if (offset + len > data.size()) {
-            throw std::runtime_error("Label exceeds packet bounds");
-        }
-        if (!name.empty()) {
-            name.push_back('.');
-        }
-        name.append(reinterpret_cast<const char*>(&data[offset]), len);
-        offset += len;
-    }
-    return name;
-}
-
-// Oye DNS naam likh rahe, compression to bina simple gaddi. (Writing DNS names plain, no fancy compression joyride.)
-void writeName(std::vector<uint8_t>& out, const std::string& name) {
-    auto labels = splitLabels(name);
-    for (const auto& label : labels) {
-        out.push_back(static_cast<uint8_t>(label.size()));
-        out.insert(out.end(), label.begin(), label.end());
-    }
-    out.push_back(0);
-}
 
 // Oye header read karke mast details le rahe. (Reading header to know the vibe.)
 DnsHeader parseHeader(const std::vector<uint8_t>& data, size_t& offset) {
@@ -155,8 +46,8 @@ DnsHeader parseHeader(const std::vector<uint8_t>& data, size_t& offset) {
         throw std::runtime_error("Packet too small for header");
     }
     DnsHeader h;
-    h.id = readUInt<uint16_t>(data, offset);
-    uint16_t flags = readUInt<uint16_t>(data, offset);
+    h.id = dns::readU16(data, offset);
+    uint16_t flags = dns::readU16(data, offset);
     h.qr = (flags >> 15) & 0x1;
     h.opcode = static_cast<uint8_t>((flags >> 11) & 0xF);
     h.aa = (flags >> 10) & 0x1;
@@ -164,16 +55,16 @@ DnsHeader parseHeader(const std::vector<uint8_t>& data, size_t& offset) {
     h.rd = (flags >> 8) & 0x1;
     h.ra = (flags >> 7) & 0x1;
     h.rcode = static_cast<uint8_t>(flags & 0xF);
-    h.qdCount = readUInt<uint16_t>(data, offset);
-    h.anCount = readUInt<uint16_t>(data, offset);
-    h.nsCount = readUInt<uint16_t>(data, offset);
-    h.arCount = readUInt<uint16_t>(data, offset);
+    h.qdCount = dns::readU16(data, offset);
+    h.anCount = dns::readU16(data, offset);
+    h.nsCount = dns::readU16(data, offset);
+    h.arCount = dns::readU16(data, offset);
     return h;
 }
 
 // Oye header likh ke packet nu suit-boot pa rahe haan. (Dressing packet with header in style.)
 void writeHeader(std::vector<uint8_t>& out, const DnsHeader& h) {
-    writeUInt<uint16_t>(out, h.id);
+    dns::writeU16(out, h.id);
     uint16_t flags = 0;
     flags |= static_cast<uint16_t>(h.qr) << 15;
     flags |= static_cast<uint16_t>(h.opcode & 0xF) << 11;
@@ -182,30 +73,30 @@ void writeHeader(std::vector<uint8_t>& out, const DnsHeader& h) {
     flags |= static_cast<uint16_t>(h.rd) << 8;
     flags |= static_cast<uint16_t>(h.ra) << 7;
     flags |= static_cast<uint16_t>(h.rcode & 0xF);
-    writeUInt<uint16_t>(out, flags);
-    writeUInt<uint16_t>(out, h.qdCount);
-    writeUInt<uint16_t>(out, h.anCount);
-    writeUInt<uint16_t>(out, h.nsCount);
-    writeUInt<uint16_t>(out, h.arCount);
+    dns::writeU16(out, flags);
+    dns::writeU16(out, h.qdCount);
+    dns::writeU16(out, h.anCount);
+    dns::writeU16(out, h.nsCount);
+    dns::writeU16(out, h.arCount);
 }
 
 // Oye question decode, pata lag rahe banda ki puchh reha. (Decoding what the curious client is asking.)
 DnsQuestion parseQuestion(const std::vector<uint8_t>& data, size_t& offset) {
     DnsQuestion q;
-    q.qname = parseName(data, offset);
-    q.qtype = readUInt<uint16_t>(data, offset);
-    q.qclass = readUInt<uint16_t>(data, offset);
+    q.qname = dns::parseName(data, offset);
+    q.qtype = dns::readU16(data, offset);
+    q.qclass = dns::readU16(data, offset);
     return q;
 }
 
 // Oye record decode, answer/an/extra nu sambhal rahe. (Decoding record, juggling answer/auth/extra.)
 DnsRecord parseRecord(const std::vector<uint8_t>& data, size_t& offset) {
     DnsRecord r;
-    r.name = parseName(data, offset);
-    r.type = readUInt<uint16_t>(data, offset);
-    r.rclass = readUInt<uint16_t>(data, offset);
-    r.ttl = readUInt<uint32_t>(data, offset);
-    uint16_t rdlength = readUInt<uint16_t>(data, offset);
+    r.name = dns::parseName(data, offset);
+    r.type = dns::readU16(data, offset);
+    r.rclass = dns::readU16(data, offset);
+    r.ttl = dns::readU32(data, offset);
+    uint16_t rdlength = dns::readU16(data, offset);
     if (offset + rdlength > data.size()) {
         throw std::runtime_error("RDATA exceeds packet");
     }
@@ -216,18 +107,18 @@ DnsRecord parseRecord(const std::vector<uint8_t>& data, size_t& offset) {
 
 // Oye question likh ke upstream nu shagun bhej rahe. (Writing question to send as sweet gift upstream.)
 void writeQuestion(std::vector<uint8_t>& out, const DnsQuestion& q) {
-    writeName(out, q.qname);
-    writeUInt<uint16_t>(out, q.qtype);
-    writeUInt<uint16_t>(out, q.qclass);
+    dns::writeName(out, q.qname);
+    dns::writeU16(out, q.qtype);
+    dns::writeU16(out, q.qclass);
 }
 
 // Oye record likh ke jawab nu sajja rahe. (Writing record to decorate the response.)
 void writeRecord(std::vector<uint8_t>& out, const DnsRecord& r) {
-    writeName(out, r.name);
-    writeUInt<uint16_t>(out, r.type);
-    writeUInt<uint16_t>(out, r.rclass);
-    writeUInt<uint32_t>(out, r.ttl);
-    writeUInt<uint16_t>(out, static_cast<uint16_t>(r.rdata.size()));
+    dns::writeName(out, r.name);
+    dns::writeU16(out, r.type);
+    dns::writeU16(out, r.rclass);
+    dns::writeU32(out, r.ttl);
+    dns::writeU16(out, static_cast<uint16_t>(r.rdata.size()));
     out.insert(out.end(), r.rdata.begin(), r.rdata.end());
 }
 
