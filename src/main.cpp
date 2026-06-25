@@ -1,5 +1,4 @@
 #include <arpa/inet.h>
-#include <chrono>
 #include <cerrno>
 #include <cstring>
 #include <iostream>
@@ -9,12 +8,11 @@
 #include <string>
 #include <sys/socket.h>
 #include <unistd.h>
-#include <utility>
 #include <vector>
 
-#include "protocol/names.hpp"
+#include "protocol/reader.hpp"
+#include "protocol/writer.hpp"
 #include "types/message.hpp"
-#include "utils/bytes.hpp"
 
 namespace {
 
@@ -27,147 +25,17 @@ constexpr int kSocketTimeoutMs = 1500;
 std::string g_upstreamResolver = "8.8.8.8";
 int g_upstreamPort = 53;
 
-using dns::DnsHeader;
-using dns::DnsPacket;
-using dns::DnsQuestion;
-using dns::DnsRecord;
-
 // Oye opcode di izzat rakho, rcode naal sauda thik karo. (Respect opcode, set rcode accordingly.)
 uint8_t computeRcode(uint8_t opcode, uint8_t fallback = 0) {
     return opcode == 0 ? fallback : 4; // 4 => Not Implemented when non-standard opcode
 }
 
 // Oye forward declaration, makeARecord nu pehlan hi bula lo. (Forward declaration to keep compiler chill.)
-DnsRecord makeARecord(const std::string& name, const std::string& ip, uint32_t ttl = 60);
-
-// Oye header read karke mast details le rahe. (Reading header to know the vibe.)
-DnsHeader parseHeader(const std::vector<uint8_t>& data, size_t& offset) {
-    if (offset + 12 > data.size()) {
-        throw std::runtime_error("Packet too small for header");
-    }
-    DnsHeader h;
-    h.id = dns::readU16(data, offset);
-    uint16_t flags = dns::readU16(data, offset);
-    h.qr = (flags >> 15) & 0x1;
-    h.opcode = static_cast<uint8_t>((flags >> 11) & 0xF);
-    h.aa = (flags >> 10) & 0x1;
-    h.tc = (flags >> 9) & 0x1;
-    h.rd = (flags >> 8) & 0x1;
-    h.ra = (flags >> 7) & 0x1;
-    h.rcode = static_cast<uint8_t>(flags & 0xF);
-    h.qdCount = dns::readU16(data, offset);
-    h.anCount = dns::readU16(data, offset);
-    h.nsCount = dns::readU16(data, offset);
-    h.arCount = dns::readU16(data, offset);
-    return h;
-}
-
-// Oye header likh ke packet nu suit-boot pa rahe haan. (Dressing packet with header in style.)
-void writeHeader(std::vector<uint8_t>& out, const DnsHeader& h) {
-    dns::writeU16(out, h.id);
-    uint16_t flags = 0;
-    flags |= static_cast<uint16_t>(h.qr) << 15;
-    flags |= static_cast<uint16_t>(h.opcode & 0xF) << 11;
-    flags |= static_cast<uint16_t>(h.aa) << 10;
-    flags |= static_cast<uint16_t>(h.tc) << 9;
-    flags |= static_cast<uint16_t>(h.rd) << 8;
-    flags |= static_cast<uint16_t>(h.ra) << 7;
-    flags |= static_cast<uint16_t>(h.rcode & 0xF);
-    dns::writeU16(out, flags);
-    dns::writeU16(out, h.qdCount);
-    dns::writeU16(out, h.anCount);
-    dns::writeU16(out, h.nsCount);
-    dns::writeU16(out, h.arCount);
-}
-
-// Oye question decode, pata lag rahe banda ki puchh reha. (Decoding what the curious client is asking.)
-DnsQuestion parseQuestion(const std::vector<uint8_t>& data, size_t& offset) {
-    DnsQuestion q;
-    q.qname = dns::parseName(data, offset);
-    q.qtype = dns::readU16(data, offset);
-    q.qclass = dns::readU16(data, offset);
-    return q;
-}
-
-// Oye record decode, answer/an/extra nu sambhal rahe. (Decoding record, juggling answer/auth/extra.)
-DnsRecord parseRecord(const std::vector<uint8_t>& data, size_t& offset) {
-    DnsRecord r;
-    r.name = dns::parseName(data, offset);
-    r.type = dns::readU16(data, offset);
-    r.rclass = dns::readU16(data, offset);
-    r.ttl = dns::readU32(data, offset);
-    uint16_t rdlength = dns::readU16(data, offset);
-    if (offset + rdlength > data.size()) {
-        throw std::runtime_error("RDATA exceeds packet");
-    }
-    r.rdata.insert(r.rdata.end(), data.begin() + offset, data.begin() + offset + rdlength);
-    offset += rdlength;
-    return r;
-}
-
-// Oye question likh ke upstream nu shagun bhej rahe. (Writing question to send as sweet gift upstream.)
-void writeQuestion(std::vector<uint8_t>& out, const DnsQuestion& q) {
-    dns::writeName(out, q.qname);
-    dns::writeU16(out, q.qtype);
-    dns::writeU16(out, q.qclass);
-}
-
-// Oye record likh ke jawab nu sajja rahe. (Writing record to decorate the response.)
-void writeRecord(std::vector<uint8_t>& out, const DnsRecord& r) {
-    dns::writeName(out, r.name);
-    dns::writeU16(out, r.type);
-    dns::writeU16(out, r.rclass);
-    dns::writeU32(out, r.ttl);
-    dns::writeU16(out, static_cast<uint16_t>(r.rdata.size()));
-    out.insert(out.end(), r.rdata.begin(), r.rdata.end());
-}
-
-// Oye full packet decode, detail report bana ke. (Decoding full packet for gossip report.)
-DnsPacket parsePacket(const std::vector<uint8_t>& data) {
-    DnsPacket p;
-    size_t offset = 0;
-    p.header = parseHeader(data, offset);
-    p.questions.reserve(p.header.qdCount);
-    p.answers.reserve(p.header.anCount);
-    p.authorities.reserve(p.header.nsCount);
-    p.additionals.reserve(p.header.arCount);
-    for (uint16_t i = 0; i < p.header.qdCount; ++i) {
-        p.questions.push_back(parseQuestion(data, offset));
-    }
-    for (uint16_t i = 0; i < p.header.anCount; ++i) {
-        p.answers.push_back(parseRecord(data, offset));
-    }
-    for (uint16_t i = 0; i < p.header.nsCount; ++i) {
-        p.authorities.push_back(parseRecord(data, offset));
-    }
-    for (uint16_t i = 0; i < p.header.arCount; ++i) {
-        p.additionals.push_back(parseRecord(data, offset));
-    }
-    return p;
-}
-
-// Oye packet encode, home-cooked response taiyaar. (Encoding packet as home-cooked response.)
-std::vector<uint8_t> buildPacket(const DnsPacket& p) {
-    std::vector<uint8_t> out;
-    writeHeader(out, p.header);
-    for (const auto& q : p.questions) {
-        writeQuestion(out, q);
-    }
-    for (const auto& r : p.answers) {
-        writeRecord(out, r);
-    }
-    for (const auto& r : p.authorities) {
-        writeRecord(out, r);
-    }
-    for (const auto& r : p.additionals) {
-        writeRecord(out, r);
-    }
-    return out;
-}
+dns::DnsRecord makeARecord(const std::string& name, const std::string& ip, uint32_t ttl = 60);
 
 // Oye local fallback, agar upstream ne taang kari to safar yahan hi khatam. (Fallback answer if upstream throws tantrum.)
-std::vector<uint8_t> buildServFail(const DnsPacket& query) {
-    DnsPacket resp;
+std::vector<uint8_t> buildServFail(const dns::DnsPacket& query) {
+    dns::DnsPacket resp;
     resp.header = query.header;
     resp.header.qr = true;
     resp.header.aa = false;
@@ -178,12 +46,12 @@ std::vector<uint8_t> buildServFail(const DnsPacket& query) {
     resp.header.arCount = 0;
     resp.header.qdCount = static_cast<uint16_t>(query.questions.size());
     resp.questions = query.questions;
-    return buildPacket(resp);
+    return dns::buildPacket(resp);
 }
 
 // Oye sirf header wala jawab, stage wali simplicity da ashirwad. (Header-only response for minimal stage expectations.)
-std::vector<uint8_t> buildHeaderOnlyReply(const DnsPacket& query) {
-    DnsPacket resp;
+std::vector<uint8_t> buildHeaderOnlyReply(const dns::DnsPacket& query) {
+    dns::DnsPacket resp;
     resp.header.id = query.header.id;
     resp.header.qr = true;
     resp.header.opcode = query.header.opcode;
@@ -196,12 +64,12 @@ std::vector<uint8_t> buildHeaderOnlyReply(const DnsPacket& query) {
     resp.header.anCount = 0;
     resp.header.nsCount = 0;
     resp.header.arCount = 0;
-    return buildPacket(resp);
+    return dns::buildPacket(resp);
 }
 
 // Oye synthetic answer, jad forwarder nakhre kare ta apne app serve karange. (Synthetic answer when forwarder throws tantrums.)
-std::vector<uint8_t> buildSyntheticAnswer(const DnsPacket& query, const std::string& ip = "8.8.8.8") {
-    DnsPacket resp;
+std::vector<uint8_t> buildSyntheticAnswer(const dns::DnsPacket& query, const std::string& ip = "8.8.8.8") {
+    dns::DnsPacket resp;
     resp.header = query.header;
     resp.header.qr = true;
     resp.header.aa = false;
@@ -221,12 +89,12 @@ std::vector<uint8_t> buildSyntheticAnswer(const DnsPacket& query, const std::str
     resp.header.anCount = static_cast<uint16_t>(resp.answers.size());
     resp.header.nsCount = static_cast<uint16_t>(resp.authorities.size());
     resp.header.arCount = static_cast<uint16_t>(resp.additionals.size());
-    return buildPacket(resp);
+    return dns::buildPacket(resp);
 }
 
 // Oye quick helper to craft A record for friendly testing. (Helper to craft a friendly A record.)
-DnsRecord makeARecord(const std::string& name, const std::string& ip, uint32_t ttl) {
-    DnsRecord r;
+dns::DnsRecord makeARecord(const std::string& name, const std::string& ip, uint32_t ttl) {
+    dns::DnsRecord r;
     r.name = name;
     r.type = 1;      // A
     r.rclass = 1;    // IN
@@ -237,7 +105,7 @@ DnsRecord makeARecord(const std::string& name, const std::string& ip, uint32_t t
 }
 
 // Oye local override da option, koi khaas domain ho ta turant jawab. (Local override for VIP domains.)
-std::optional<std::vector<uint8_t>> tryLocalAnswer(const DnsPacket& query) {
+std::optional<std::vector<uint8_t>> tryLocalAnswer(const dns::DnsPacket& query) {
     // Oye local override sirf default resolver te, forwarding wale mode vich nahi. (Local override only when using default resolver, not in forwarding mode.)
     if (g_upstreamResolver != "8.8.8.8") {
         return std::nullopt;
@@ -247,7 +115,7 @@ std::optional<std::vector<uint8_t>> tryLocalAnswer(const DnsPacket& query) {
     }
     const auto& q = query.questions.front();
     if (q.qtype == 1 && q.qclass == 1 && q.qname == "codecrafters.io") {
-        DnsPacket resp;
+        dns::DnsPacket resp;
         resp.header = query.header;
         resp.header.qr = true;
         resp.header.aa = false;
@@ -259,7 +127,7 @@ std::optional<std::vector<uint8_t>> tryLocalAnswer(const DnsPacket& query) {
         resp.header.anCount = static_cast<uint16_t>(resp.answers.size());
         resp.header.nsCount = static_cast<uint16_t>(resp.authorities.size());
         resp.header.arCount = static_cast<uint16_t>(resp.additionals.size());
-        return buildPacket(resp);
+        return dns::buildPacket(resp);
     }
     return std::nullopt;
 }
@@ -326,7 +194,7 @@ int createServerSocket() {
 }
 
 // Oye logging helper, bas halka phulka bakbak. (Lightweight gossip logger.)
-void logPacketSummary(const DnsPacket& packet) {
+void logPacketSummary(const dns::DnsPacket& packet) {
     std::ostringstream oss;
     oss << "id=" << packet.header.id << " qd=" << packet.header.qdCount
         << " an=" << packet.header.anCount << " ns=" << packet.header.nsCount
@@ -385,7 +253,7 @@ int main(int argc, char* argv[]) {
 
         std::optional<std::vector<uint8_t>> response;
         try {
-            DnsPacket packet = parsePacket(request);
+            dns::DnsPacket packet = dns::parsePacket(request);
             logPacketSummary(packet);
 
             if (packet.header.opcode != 0) {
@@ -407,9 +275,9 @@ int main(int argc, char* argv[]) {
         } catch (const std::exception& ex) {
             std::cerr << "Parsing error: " << ex.what() << std::endl;
             try {
-                DnsPacket fallbackPacket;
+                dns::DnsPacket fallbackPacket;
                 size_t offset = 0;
-                fallbackPacket.header = parseHeader(request, offset);
+                fallbackPacket.header = dns::parseHeader(request, offset);
                 response = buildServFail(fallbackPacket);
             } catch (...) {
                 response = std::nullopt;
