@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "protocol/reader.hpp"
+#include "protocol/responses.hpp"
 #include "protocol/writer.hpp"
 #include "types/message.hpp"
 
@@ -25,47 +26,8 @@ constexpr int kSocketTimeoutMs = 1500;
 std::string g_upstreamResolver = "8.8.8.8";
 int g_upstreamPort = 53;
 
-// Oye opcode di izzat rakho, rcode naal sauda thik karo. (Respect opcode, set rcode accordingly.)
-uint8_t computeRcode(uint8_t opcode, uint8_t fallback = 0) {
-    return opcode == 0 ? fallback : 4; // 4 => Not Implemented when non-standard opcode
-}
-
 // Oye forward declaration, makeARecord nu pehlan hi bula lo. (Forward declaration to keep compiler chill.)
 dns::DnsRecord makeARecord(const std::string& name, const std::string& ip, uint32_t ttl = 60);
-
-// Oye local fallback, agar upstream ne taang kari to safar yahan hi khatam. (Fallback answer if upstream throws tantrum.)
-std::vector<uint8_t> buildServFail(const dns::DnsPacket& query) {
-    dns::DnsPacket resp;
-    resp.header = query.header;
-    resp.header.qr = true;
-    resp.header.aa = false;
-    resp.header.ra = false;
-    resp.header.rcode = computeRcode(query.header.opcode, 2); // SERVFAIL unless opcode demands Not Implemented
-    resp.header.anCount = 0;
-    resp.header.nsCount = 0;
-    resp.header.arCount = 0;
-    resp.header.qdCount = static_cast<uint16_t>(query.questions.size());
-    resp.questions = query.questions;
-    return dns::buildPacket(resp);
-}
-
-// Oye sirf header wala jawab, stage wali simplicity da ashirwad. (Header-only response for minimal stage expectations.)
-std::vector<uint8_t> buildHeaderOnlyReply(const dns::DnsPacket& query) {
-    dns::DnsPacket resp;
-    resp.header.id = query.header.id;
-    resp.header.qr = true;
-    resp.header.opcode = query.header.opcode;
-    resp.header.aa = false;
-    resp.header.tc = false;
-    resp.header.rd = query.header.rd;
-    resp.header.ra = false;
-    resp.header.rcode = computeRcode(query.header.opcode, 0);
-    resp.header.qdCount = 0;
-    resp.header.anCount = 0;
-    resp.header.nsCount = 0;
-    resp.header.arCount = 0;
-    return dns::buildPacket(resp);
-}
 
 // Oye synthetic answer, jad forwarder nakhre kare ta apne app serve karange. (Synthetic answer when forwarder throws tantrums.)
 std::vector<uint8_t> buildSyntheticAnswer(const dns::DnsPacket& query, const std::string& ip = "8.8.8.8") {
@@ -76,7 +38,7 @@ std::vector<uint8_t> buildSyntheticAnswer(const dns::DnsPacket& query, const std
     resp.header.tc = false;
     resp.header.rd = query.header.rd;
     resp.header.ra = false;
-    resp.header.rcode = computeRcode(query.header.opcode, 0);
+    resp.header.rcode = dns::rcodeFor(query.header.opcode, dns::Rcode::kNoError);
     resp.questions = query.questions;
     resp.header.qdCount = static_cast<uint16_t>(resp.questions.size());
 
@@ -120,7 +82,7 @@ std::optional<std::vector<uint8_t>> tryLocalAnswer(const dns::DnsPacket& query) 
         resp.header.qr = true;
         resp.header.aa = false;
         resp.header.ra = false;
-        resp.header.rcode = computeRcode(query.header.opcode, 0);
+        resp.header.rcode = dns::rcodeFor(query.header.opcode, dns::Rcode::kNoError);
         resp.header.qdCount = static_cast<uint16_t>(query.questions.size());
         resp.questions = query.questions;
         resp.answers.push_back(makeARecord(q.qname, "8.8.8.8", 300));
@@ -278,7 +240,7 @@ int main(int argc, char* argv[]) {
                 dns::DnsPacket fallbackPacket;
                 size_t offset = 0;
                 fallbackPacket.header = dns::parseHeader(request, offset);
-                response = buildServFail(fallbackPacket);
+                response = dns::buildServFail(fallbackPacket);
             } catch (...) {
                 response = std::nullopt;
             }
