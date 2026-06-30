@@ -13,6 +13,7 @@
 #include "protocol/reader.hpp"
 #include "protocol/responses.hpp"
 #include "protocol/writer.hpp"
+#include "resolver/upstream.hpp"
 #include "types/message.hpp"
 #include "utils/logger.hpp"
 
@@ -20,12 +21,9 @@ namespace {
 
 // Oye baselines set kar rahe haan, code nu pad ke muskaan aayegi. (Setting stage for fun yet serious DNS antics.)
 constexpr int kDnsPort = 2053;
-constexpr size_t kMaxPacketSize = 512; // DNS classic limit
-constexpr int kSocketTimeoutMs = 1500;
 
-// Oye global resolver, runtime te badal sakde. (Global resolver that can be swapped at runtime.)
-std::string g_upstreamResolver = "8.8.8.8";
-int g_upstreamPort = 53;
+// Oye upstream resolver, command line to badal sakde. (Upstream resolver, swappable from the command line.)
+dns::UpstreamConfig g_upstream;
 
 // Oye forward declaration, makeARecord nu pehlan hi bula lo. (Forward declaration to keep compiler chill.)
 dns::DnsRecord makeARecord(const std::string& name, const std::string& ip, uint32_t ttl = 60);
@@ -70,7 +68,7 @@ dns::DnsRecord makeARecord(const std::string& name, const std::string& ip, uint3
 // Oye local override da option, koi khaas domain ho ta turant jawab. (Local override for VIP domains.)
 std::optional<std::vector<uint8_t>> tryLocalAnswer(const dns::DnsPacket& query) {
     // Oye local override sirf default resolver te, forwarding wale mode vich nahi. (Local override only when using default resolver, not in forwarding mode.)
-    if (g_upstreamResolver != "8.8.8.8") {
+    if (g_upstream.host != "8.8.8.8") {
         return std::nullopt;
     }
     if (query.questions.empty()) {
@@ -95,39 +93,6 @@ std::optional<std::vector<uint8_t>> tryLocalAnswer(const dns::DnsPacket& query) 
     return std::nullopt;
 }
 
-// Oye upstream forwarding, packet nu Uber bhej rahe Google DNS kol. (Forwarding packet via Uber to Google DNS.)
-std::optional<std::vector<uint8_t>> forwardToUpstream(const uint8_t* data, size_t length) {
-    int sock = socket(AF_INET, SOCK_DGRAM, 0);
-    if (sock < 0) {
-        return std::nullopt;
-    }
-
-    timeval tv{};
-    tv.tv_sec = kSocketTimeoutMs / 1000;
-    tv.tv_usec = (kSocketTimeoutMs % 1000) * 1000;
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-
-    sockaddr_in upstream{};
-    upstream.sin_family = AF_INET;
-    upstream.sin_port = htons(g_upstreamPort);
-    inet_pton(AF_INET, g_upstreamResolver.c_str(), &upstream.sin_addr);
-
-    ssize_t sent = sendto(sock, data, length, 0, reinterpret_cast<sockaddr*>(&upstream), sizeof(upstream));
-    if (sent < 0) {
-        close(sock);
-        return std::nullopt;
-    }
-
-    std::vector<uint8_t> buffer(kMaxPacketSize);
-    ssize_t received = recv(sock, buffer.data(), buffer.size(), 0);
-    close(sock);
-    if (received < 0) {
-        return std::nullopt;
-    }
-    buffer.resize(static_cast<size_t>(received));
-    return buffer;
-}
-
 } // namespace
 
 int main(int argc, char* argv[]) {
@@ -138,11 +103,11 @@ int main(int argc, char* argv[]) {
             std::string resolverAddr = argv[i + 1];
             auto colonPos = resolverAddr.find(':');
             if (colonPos != std::string::npos) {
-                g_upstreamResolver = resolverAddr.substr(0, colonPos);
-                g_upstreamPort = std::stoi(resolverAddr.substr(colonPos + 1));
+                g_upstream.host = resolverAddr.substr(0, colonPos);
+                g_upstream.port = std::stoi(resolverAddr.substr(colonPos + 1));
             } else {
-                g_upstreamResolver = resolverAddr;
-                g_upstreamPort = 53;
+                g_upstream.host = resolverAddr;
+                g_upstream.port = 53;
             }
             ++i;
         }
@@ -176,7 +141,7 @@ int main(int argc, char* argv[]) {
                 // Oye multiple questions, apni factory khol rahe. (Multiple questions, running our own factory.)
                 response = buildSyntheticAnswer(packet);
             } else {
-                response = forwardToUpstream(request->bytes.data(), request->bytes.size());
+                response = dns::forwardToUpstream(g_upstream, request->bytes.data(), request->bytes.size());
                 if (!response) {
                     // Oye upstream busy, asi khud answer de rahe. (Upstream ghosted, we self-serve.)
                     response = buildSyntheticAnswer(packet);
