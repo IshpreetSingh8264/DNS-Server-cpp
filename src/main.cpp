@@ -4,16 +4,17 @@
 #include <iostream>
 #include <netinet/in.h>
 #include <optional>
-#include <sstream>
 #include <string>
 #include <sys/socket.h>
 #include <unistd.h>
 #include <vector>
 
+#include "net/socket.hpp"
 #include "protocol/reader.hpp"
 #include "protocol/responses.hpp"
 #include "protocol/writer.hpp"
 #include "types/message.hpp"
+#include "utils/logger.hpp"
 
 namespace {
 
@@ -127,54 +128,9 @@ std::optional<std::vector<uint8_t>> forwardToUpstream(const uint8_t* data, size_
     return buffer;
 }
 
-// Oye socket bana ke duniya se baat karange. (Spinning up socket to chat with the world.)
-int createServerSocket() {
-    int udpSocket = socket(AF_INET, SOCK_DGRAM, 0);
-    if (udpSocket == -1) {
-        std::cerr << "Socket creation failed: " << strerror(errno) << std::endl;
-        return -1;
-    }
-
-    int reuse = 1;
-    if (setsockopt(udpSocket, SOL_SOCKET, SO_REUSEPORT, &reuse, sizeof(reuse)) < 0) {
-        std::cerr << "SO_REUSEPORT failed: " << strerror(errno) << std::endl;
-        close(udpSocket);
-        return -1;
-    }
-
-    sockaddr_in servAddr{};
-    servAddr.sin_family = AF_INET;
-    servAddr.sin_port = htons(kDnsPort);
-    servAddr.sin_addr.s_addr = htonl(INADDR_ANY);
-
-    if (bind(udpSocket, reinterpret_cast<struct sockaddr*>(&servAddr), sizeof(servAddr)) != 0) {
-        std::cerr << "Bind failed: " << strerror(errno) << std::endl;
-        close(udpSocket);
-        return -1;
-    }
-    return udpSocket;
-}
-
-// Oye logging helper, bas halka phulka bakbak. (Lightweight gossip logger.)
-void logPacketSummary(const dns::DnsPacket& packet) {
-    std::ostringstream oss;
-    oss << "id=" << packet.header.id << " qd=" << packet.header.qdCount
-        << " an=" << packet.header.anCount << " ns=" << packet.header.nsCount
-        << " ar=" << packet.header.arCount;
-    if (!packet.questions.empty()) {
-        oss << " qname=" << packet.questions.front().qname << " qtype=" << packet.questions.front().qtype;
-    }
-    std::cout << "Incoming packet: " << oss.str() << std::endl;
-}
-
 } // namespace
 
 int main(int argc, char* argv[]) {
-    // Oye stdout flush on, taaki logs jaldi nikal jaan. (Auto flush so logs sprint out.)
-    std::cout << std::unitbuf;
-    std::cerr << std::unitbuf;
-    setbuf(stdout, nullptr);
-
     // Oye command-line arguments, resolver nu pakad rahe. (Parsing command-line args to grab resolver.)
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -193,53 +149,45 @@ int main(int argc, char* argv[]) {
     }
 
     // Oye server socket te dhyaan, bina isde kahani hi adhuri. (Server socket is the hero of this story.)
-    int serverSocket = createServerSocket();
+    const int serverSocket = dns::bindServerSocket(kDnsPort);
     if (serverSocket < 0) {
         return 1;
     }
 
-    sockaddr_in clientAddress{};
-    std::vector<uint8_t> buffer(kMaxPacketSize + 1);
-
     // Oye infinite loop, DNS seva 24x7. (Service loop, dhaba open 24x7.)
     while (true) {
-        socklen_t clientAddrLen = sizeof(clientAddress);  // Oye har baar reset, address corruption na ho. (Reset each time to avoid address corruption.)
-        ssize_t bytesRead = recvfrom(serverSocket, buffer.data(), kMaxPacketSize, 0,
-                                     reinterpret_cast<sockaddr*>(&clientAddress), &clientAddrLen);
-        if (bytesRead <= 0) {
-            std::cerr << "Error receiving data: " << strerror(errno) << std::endl;
+        const std::optional<dns::Datagram> request = dns::receiveDatagram(serverSocket);
+        if (!request) {
             continue;
         }
-        buffer[static_cast<size_t>(bytesRead)] = 0;
-        std::vector<uint8_t> request(buffer.begin(), buffer.begin() + bytesRead);
 
         std::optional<std::vector<uint8_t>> response;
         try {
-            dns::DnsPacket packet = dns::parsePacket(request);
-            logPacketSummary(packet);
+            const dns::DnsPacket packet = dns::parsePacket(request->bytes);
+            dns::logPacketSummary(packet);
 
             if (packet.header.opcode != 0) {
-                response = buildHeaderOnlyReply(packet);
+                response = dns::buildHeaderOnlyReply(packet);
             } else if (packet.header.rd == 0) {
-                response = buildHeaderOnlyReply(packet);
+                response = dns::buildHeaderOnlyReply(packet);
             } else if (auto local = tryLocalAnswer(packet)) {
                 response = local;
             } else if (packet.header.qdCount > 1) {
                 // Oye multiple questions, apni factory khol rahe. (Multiple questions, running our own factory.)
                 response = buildSyntheticAnswer(packet);
             } else {
-                response = forwardToUpstream(request.data(), request.size());
+                response = forwardToUpstream(request->bytes.data(), request->bytes.size());
                 if (!response) {
                     // Oye upstream busy, asi khud answer de rahe. (Upstream ghosted, we self-serve.)
                     response = buildSyntheticAnswer(packet);
                 }
             }
         } catch (const std::exception& ex) {
-            std::cerr << "Parsing error: " << ex.what() << std::endl;
+            dns::logError(std::string{"Parsing error: "} + ex.what());
             try {
                 dns::DnsPacket fallbackPacket;
-                size_t offset = 0;
-                fallbackPacket.header = dns::parseHeader(request, offset);
+                std::size_t offset = 0;
+                fallbackPacket.header = dns::parseHeader(request->bytes, offset);
                 response = dns::buildServFail(fallbackPacket);
             } catch (...) {
                 response = std::nullopt;
@@ -247,11 +195,7 @@ int main(int argc, char* argv[]) {
         }
 
         if (response && !response->empty()) {
-            ssize_t sent = sendto(serverSocket, response->data(), response->size(), 0,
-                                  reinterpret_cast<sockaddr*>(&clientAddress), clientAddrLen);
-            if (sent < 0) {
-                std::cerr << "Failed to send response: " << strerror(errno) << std::endl;
-            }
+            dns::sendDatagram(serverSocket, *response, request->from, request->fromLength);
         }
     }
 
