@@ -13,6 +13,7 @@
 #include "protocol/reader.hpp"
 #include "protocol/responses.hpp"
 #include "protocol/writer.hpp"
+#include "resolver/local_override.hpp"
 #include "resolver/upstream.hpp"
 #include "types/message.hpp"
 #include "utils/logger.hpp"
@@ -65,34 +66,6 @@ dns::DnsRecord makeARecord(const std::string& name, const std::string& ip, uint3
     return r;
 }
 
-// Oye local override da option, koi khaas domain ho ta turant jawab. (Local override for VIP domains.)
-std::optional<std::vector<uint8_t>> tryLocalAnswer(const dns::DnsPacket& query) {
-    // Oye local override sirf default resolver te, forwarding wale mode vich nahi. (Local override only when using default resolver, not in forwarding mode.)
-    if (g_upstream.host != "8.8.8.8") {
-        return std::nullopt;
-    }
-    if (query.questions.empty()) {
-        return std::nullopt;
-    }
-    const auto& q = query.questions.front();
-    if (q.qtype == 1 && q.qclass == 1 && q.qname == "codecrafters.io") {
-        dns::DnsPacket resp;
-        resp.header = query.header;
-        resp.header.qr = true;
-        resp.header.aa = false;
-        resp.header.ra = false;
-        resp.header.rcode = dns::rcodeFor(query.header.opcode, dns::Rcode::kNoError);
-        resp.header.qdCount = static_cast<uint16_t>(query.questions.size());
-        resp.questions = query.questions;
-        resp.answers.push_back(makeARecord(q.qname, "8.8.8.8", 300));
-        resp.header.anCount = static_cast<uint16_t>(resp.answers.size());
-        resp.header.nsCount = static_cast<uint16_t>(resp.authorities.size());
-        resp.header.arCount = static_cast<uint16_t>(resp.additionals.size());
-        return dns::buildPacket(resp);
-    }
-    return std::nullopt;
-}
-
 } // namespace
 
 int main(int argc, char* argv[]) {
@@ -135,7 +108,7 @@ int main(int argc, char* argv[]) {
                 response = dns::buildHeaderOnlyReply(packet);
             } else if (packet.header.rd == 0) {
                 response = dns::buildHeaderOnlyReply(packet);
-            } else if (auto local = tryLocalAnswer(packet)) {
+            } else if (auto local = dns::tryLocalAnswer(packet)) {
                 response = local;
             } else if (packet.header.qdCount > 1) {
                 // Oye multiple questions, apni factory khol rahe. (Multiple questions, running our own factory.)
