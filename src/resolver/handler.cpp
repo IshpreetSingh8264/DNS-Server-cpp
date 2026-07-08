@@ -1,0 +1,82 @@
+#include "resolver/handler.hpp"
+
+#include <cstddef>
+#include <exception>
+#include <string>
+
+#include "protocol/reader.hpp"
+#include "protocol/responses.hpp"
+#include "resolver/local_override.hpp"
+#include "resolver/upstream.hpp"
+#include "types/message.hpp"
+#include "utils/logger.hpp"
+
+namespace dns {
+namespace {
+
+// Parsefail te sirf header hi bachda hai: questions nu padh sakde hi nahi, ta
+// chhadke. (After a parse failure only the header is trustworthy, so echo just the
+// header. Reporting a SERVFAIL for a malformed datagram rather than dropping it is
+// better than leaving the client waiting.)
+std::vector<std::uint8_t> replyToUndecodableRequest(const std::vector<std::uint8_t>& request) {
+    DnsPacket headerOnly;
+    std::size_t offset = 0;
+    headerOnly.header = parseHeader(request, offset);
+    return buildServFail(headerOnly);
+}
+
+}  // namespace
+
+// Oye poora safar: pehlan apna zone, phir upstream, phir (sirf error da option).
+// (The whole trip: our own zone, then upstream, and only then an error.)
+std::optional<std::vector<std::uint8_t>> handleQuery(const std::vector<std::uint8_t>& request,
+                                                     const UpstreamConfig& upstream) {
+    DnsPacket query;
+    try {
+        query = parsePacket(request);
+    } catch (const std::exception& ex) {
+        logError(std::string{"Could not decode request: "} + ex.what());
+        try {
+            return replyToUndecodableRequest(request);
+        } catch (const std::exception& inner) {
+            logError(std::string{"Could not even build an error response: "} + inner.what());
+            return std::nullopt;
+        }
+    }
+
+    logPacketSummary(query);
+
+    // Oye opcode ya recursion nu apni taqdeer de raha hai, islye khud jawab dein. (We are
+    // being asked for something this server does not do, so answer it ourselves
+    // instead of troubling the upstream.)
+    if (query.header.opcode != 0) {
+        return buildHeaderOnlyReply(query);
+    }
+    if (query.header.rd == 0) {
+        return buildHeaderOnlyReply(query);
+    }
+
+    if (auto local = tryLocalAnswer(query)) {
+        return local;
+    }
+
+    // Oye baaki sagla packet, chahe ik ya sau questions ho, seedha upstream. (Everything
+    // else - one question or a hundred - goes straight upstream, byte for byte. We
+    // relay whatever comes back; we do not second-guess it and we do not invent a
+    // better-looking answer than the one we were actually given.)
+    std::optional<std::vector<std::uint8_t>> relayed =
+        forwardToUpstream(upstream, request.data(), request.size());
+    if (relayed) {
+        return relayed;
+    }
+
+    // Oye upstream nahi mila, ta error dilange. Jawab nahi banayenge - koi galat IP ya
+    // koi invented record iss nu galat samajh ke koi ohda le lavan ge. (The upstream is
+    // gone, so we return an error. We do not answer instead: a made-up IP or a made-up
+    // record is worse than no answer, because a client will believe it.)
+    logError("Upstream " + upstream.host + ":" + std::to_string(upstream.port) +
+             " unreachable; replying SERVFAIL");
+    return buildServFail(query);
+}
+
+}  // namespace dns
