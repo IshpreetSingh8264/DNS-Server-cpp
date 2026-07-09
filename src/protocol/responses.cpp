@@ -12,7 +12,10 @@ std::uint8_t rcodeFor(std::uint8_t opcode, Rcode fallback) {
                        : static_cast<std::uint8_t>(Rcode::kNotImplemented);
 }
 
-// Oye sirf header wala jawab, stage wali simplicity da ashirwad. (Header-only response for minimal stage expectations.)
+// Oye sirf header wala jawab, stage wali simplicity da ashirwad. (Header-only response
+// for minimal stage expectations.) "Header-only" means no answer records, not "no
+// question": the question section is echoed so the client can match the response to
+// what it asked, and that costs 12 bytes plus the question either way.
 std::vector<std::uint8_t> buildHeaderOnlyReply(const DnsPacket& query) {
     DnsPacket resp;
     resp.header.id = query.header.id;
@@ -23,10 +26,8 @@ std::vector<std::uint8_t> buildHeaderOnlyReply(const DnsPacket& query) {
     resp.header.rd = query.header.rd;
     resp.header.ra = false;
     resp.header.rcode = rcodeFor(query.header.opcode, Rcode::kNoError);
-    resp.header.qdCount = 0;
-    resp.header.anCount = 0;
-    resp.header.nsCount = 0;
-    resp.header.arCount = 0;
+    resp.questions = query.questions;
+    resp.syncCounts();
     return buildPacket(resp);
 }
 
@@ -38,11 +39,8 @@ std::vector<std::uint8_t> buildServFail(const DnsPacket& query) {
     resp.header.aa = false;
     resp.header.ra = false;
     resp.header.rcode = rcodeFor(query.header.opcode, Rcode::kServerFailure);
-    resp.header.anCount = 0;
-    resp.header.nsCount = 0;
-    resp.header.arCount = 0;
-    resp.header.qdCount = static_cast<std::uint16_t>(query.questions.size());
     resp.questions = query.questions;
+    resp.syncCounts();
     return buildPacket(resp);
 }
 
