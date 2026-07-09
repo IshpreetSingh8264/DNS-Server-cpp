@@ -67,6 +67,17 @@ std::optional<std::vector<std::uint8_t>> handleQuery(const std::vector<std::uint
     std::optional<std::vector<std::uint8_t>> relayed =
         forwardToUpstream(upstream, request.data(), request.size());
     if (relayed) {
+        // Oye jawaab 512 (ya EDNS0 limit) to ohdar hai, te aam tor te assi nu kaate
+        // dena padega. Kadhe 1 te ghaad de ke nahi bhejna - TC bit laga ke bhejo, ta
+        // client nu pata lage ki kuch reh gaya hai. (The reply is over the UDP limit and
+        // may have to be cut. Never cut it silently: set TC so the client knows records
+        // are missing.)
+        if (relayed->size() > maxResponseSize(query)) {
+            logInfo("Upstream reply is " + std::to_string(relayed->size()) +
+                    " bytes, over the " + std::to_string(maxResponseSize(query)) +
+                    "-byte limit for this client; replying with TC set");
+            return buildTruncatedReply(query);
+        }
         return relayed;
     }
 

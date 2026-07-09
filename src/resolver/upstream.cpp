@@ -43,8 +43,20 @@ std::optional<std::vector<std::uint8_t>> forwardToUpstream(const UpstreamConfig&
         return std::nullopt;
     }
 
-    const ssize_t sent =
-        sendto(sock, data, length, 0, reinterpret_cast<sockaddr*>(&server), sizeof(server));
+    // Oye connect() zaroori hai, warna kernel kisi de bhi datagram nu jawaab samajh
+    // lavan ge. Aaj kal koi ukhaad pakad ke 8.8.8.8 nu jawaab bhej de, oh seedha
+    // client tak pohanch janda - te assi usnu "jawaab" maan ke bhej dende haan.
+    // (connect() is not optional. Without it the kernel hands us a reply from any
+    // source, and whatever random datagram arrives while we wait gets relayed to a
+    // real client as if the upstream had said it. Connecting pins the peer, so only
+    // the resolver's own datagram is accepted.)
+    if (connect(sock, reinterpret_cast<sockaddr*>(&server), sizeof(server)) != 0) {
+        logError(std::string{"Could not connect to upstream: "} + strerror(errno));
+        close(sock);
+        return std::nullopt;
+    }
+
+    const ssize_t sent = send(sock, data, length, 0);
     if (sent < 0) {
         logError(std::string{"Upstream send failed: "} + strerror(errno));
         close(sock);
