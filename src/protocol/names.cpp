@@ -25,6 +25,16 @@ std::string parseNameImpl(const std::vector<std::uint8_t>& data, std::size_t& of
                 static_cast<std::uint16_t>((static_cast<std::uint16_t>(len & 0x3F) << 8) | data[offset + 1]);
             offset += 2;
             std::size_t jumpTarget = ptr;
+            // Oye dot zaroori hai. A pointer can follow a literal label - "def" followed
+            // by a jump into "longassdomainname.com" is one name, "def.longassdomainname.com",
+            // not two names glued together. Joining them without the dot turns one
+            // hostname into a different, wrong one that will never resolve.
+            // (The dot matters. A pointer may follow a literal label, and the two halves
+            // are one name. Skipping the dot yields a different, nonexistent hostname
+            // that can never resolve - a silent wrong answer, not a parse error.)
+            if (!name.empty()) {
+                name.push_back('.');
+            }
             name += parseNameImpl(data, jumpTarget, jumps + 1);
             return name;
         }
