@@ -7,6 +7,7 @@
 #include "protocol/reader.hpp"
 #include "protocol/responses.hpp"
 #include "resolver/local_override.hpp"
+#include "resolver/multiquery.hpp"
 #include "resolver/upstream.hpp"
 #include "types/message.hpp"
 #include "utils/logger.hpp"
@@ -61,11 +62,13 @@ std::optional<std::vector<std::uint8_t>> handleQuery(const std::vector<std::uint
     }
 
     // Oye baaki sagla packet, chahe ik ya sau questions ho, seedha upstream. (Everything
-    // else - one question or a hundred - goes straight upstream, byte for byte. We
-    // relay whatever comes back; we do not second-guess it and we do not invent a
-    // better-looking answer than the one we were actually given.)
+    // else - one question or a hundred - is answered by the upstream, never by us. We
+    // relay what it says, or what merging its per-question replies says; we do not
+    // second-guess it and we do not invent a better-looking answer.)
     std::optional<std::vector<std::uint8_t>> relayed =
-        forwardToUpstream(upstream, request.data(), request.size());
+        query.questions.size() > 1
+            ? forwardMultiQuestion(query, upstream)
+            : forwardToUpstream(upstream, request.data(), request.size());
     if (relayed) {
         // Oye jawaab 512 (ya EDNS0 limit) to ohdar hai, te aam tor te assi nu kaate
         // dena padega. Kadhe 1 te ghaad de ke nahi bhejna - TC bit laga ke bhejo, ta
