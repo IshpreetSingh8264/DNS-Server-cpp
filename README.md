@@ -2,38 +2,89 @@
 
 Welcome to the **Pinglish-powered DNS server** built for the
 ["Build Your Own DNS server" Challenge](https://app.codecrafters.io/courses/dns-server/overview).
+All 8 stages pass (`codecrafters test` → 8/8).
 
-## Introduction
-- A full UDP DNS forwarder with local override for `codecrafters.io`, compression parsing, and SERVFAIL fallback.
-- All logic lives in [src/main.cpp](src/main.cpp); comments are Pinglish plus playful English translations.
+## What it does
 
-## Repository Setup
-- Requirements: `cmake`, `g++` (C++17), and a Linux-y socket stack.
-- Run `./your_program.sh` to build and start the server on UDP `2053`.
+A UDP DNS forwarder on `0.0.0.0:2053`. A query is answered from a small local zone if we
+are authoritative for the name; otherwise it goes to a real upstream resolver
+(`8.8.8.8:53` by default, `--resolver <ip>[:<port>]` to change it) and the reply is
+relayed back.
 
-## Setup UDP Server
-- The server binds `0.0.0.0:2053` with `SO_REUSEPORT` so restarts stay smooth.
-- Main loop receives packets, parses, and replies immediately.
+**It never invents an answer.** If the upstream cannot be reached the client gets
+`SERVFAIL`, not a made-up IP. That rule is the reason the code is split the way it is —
+see `docs/ARCHITECTURE.md`.
 
-## Write header/question/answer sections
-- `DnsHeader`, `DnsQuestion`, and `DnsRecord` structs capture every field.
-- Encode/decode helpers read/write network byte order, ensuring flags and counts stay correct.
+## Repository setup
 
-## Parse header/question/compressed packet
-- `parsePacket()` walks header, questions, answers, authority, and additional sections.
-- `parseName()` understands compressed labels (pointer handling with loop protection).
+- `cmake`, `g++` with C++23, and a POSIX socket stack. No third-party libraries.
+- `./your_program.sh` builds and runs the server.
+- `codecrafters test` runs the graded stages.
 
-## Forwarding Server
-- Queries try local override first (`codecrafters.io` → `8.8.8.8`).
-- Otherwise packets forward to upstream resolver `8.8.8.8:53` with a 1.5s timeout; failures fall back to SERVFAIL.
+## How the code is organised
 
-## Running locally
-```sh
-./your_program.sh
-# Then, from another shell:
-dig @127.0.0.1 -p 2053 codecrafters.io A
+Not one file — see `docs/ARCHITECTURE.md` for the module map and data flow, and
+`.github/copilot-instructions.md` for the conventions and the traps.
+
+```
+src/main.cpp        argv, bind, receive -> handleQuery -> send. Nothing else.
+src/types/          DnsHeader, DnsQuestion, DnsRecord, DnsPacket, enums
+src/protocol/       name codec, packet reader, packet writer, local responses
+src/resolver/       handler, local zone, multi-question fan-out, upstream
+src/net/            bind / receive / send
+src/utils/          byte helpers, logger (stderr)
 ```
 
-## Notes
-- Packet size capped at 512 bytes (classic DNS over UDP limit).
-- Output is auto-flushed to keep logs visible in Codecrafters runner.
+Everything is in `namespace dns`, and every header has a real `.cpp`.
+
+## What each course stage is implemented by
+
+| Stage | Where |
+|---|---|
+| Parse header | `protocol/reader.cpp` → `parseHeader` |
+| Parse question | `protocol/reader.cpp` → `parseQuestion`, `protocol/names.cpp` → `parseName` |
+| Setup UDP server | `net/socket.cpp` → `bindServerSocket` |
+| Write header | `protocol/writer.cpp` → `writeHeader` |
+| Write question | `protocol/writer.cpp` → `writeQuestion` |
+| Write answer | `protocol/writer.cpp` → `writeRecord` |
+| Parse compressed packet | `protocol/names.cpp` → `parseName` (compression pointers, 20-jump loop guard) |
+| Forwarding server | `resolver/handler.cpp`, `resolver/upstream.cpp` |
+
+## Local zone
+
+`resolver/local_override.cpp` holds a `kLocalZone[]` table. It currently maps
+`codecrafters.io` → `8.8.8.8` with a 300 s TTL, which is the A record the course's
+A-record stage requires. This is zone data we chose, not a fallback: the table returns
+`nullopt` for every other name, so those queries reach the upstream. It is served no
+matter which `--resolver` is configured.
+
+## Not implemented, and not on the course
+
+The course was trimmed to 8 stages. There is **no** TCP DNS, **no** multiple A records
+for one name, **no** `ANY` query handling and **no** IPv6-specific handling. AAAA
+records are parsed and relayed like any other record type. These are absent on purpose.
+
+## Known limitations
+
+- Locally built responses (`SERVFAIL`, header-only, `TC`) do not echo an EDNS0 OPT
+  record. Forwarded replies do, because they are relayed byte for byte.
+- `writeName` does not compress outgoing names, so a response near the size limit is
+  larger than it needs to be.
+- Requests are served one at a time, synchronously; a slow upstream blocks other
+  clients for up to 1.5 s.
+
+## Running locally
+
+```sh
+./your_program.sh
+# from another shell:
+dig @127.0.0.1 -p 2053 example.com A +short
+dig @127.0.0.1 -p 2053 codecrafters.io A +short
+```
+
+`SO_REUSEPORT` is set so restarts are smooth, which also means a server left over from
+an earlier session keeps answering. Check with `ss -ulnp | grep 2053` before trusting a
+result.
+
+All logging goes to **stderr**; stdout is never written to. Comments are Pinglish with
+an English translation, which is this project's voice.
