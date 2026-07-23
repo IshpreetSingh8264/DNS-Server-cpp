@@ -1,8 +1,8 @@
 # Architecture — DNS Server (C++)
 
 UDP DNS forwarder for the [CodeCrafters DNS server course](https://app.codecrafters.io/courses/dns-server/overview).
-Every stage of the course passes. The server answers from a small local zone, and
-forwards everything else to a real upstream resolver.
+The implementation covers all 8 stages of the course. The server answers from a small local
+zone, and forwards everything else to a real upstream resolver.
 
 ## The one rule
 
@@ -77,9 +77,15 @@ net/socket::sendDatagram
 
 ## Conventions
 
-- **`namespace dns`.** Every symbol. No exceptions.
-- **Every header has a real `.cpp`.** No inline definitions, no header-only modules.
-  Only `types/message.hpp` carries inline code and it is a struct of data.
+- **`namespace dns`.** Every symbol.
+- **Every header has a real `.cpp`.** No header-only modules. Three headers carry
+  `inline constexpr` data rather than declarations: `types/message.hpp`
+  (`kHeaderSize`, `kMaxNamePointerJumps`), `net/socket.hpp` (`kMaxDatagramSize`),
+  and `resolver/local_override.hpp` (`kLocalZoneAddress`, `kLocalZoneTtl`).
+- **`std::runtime_error` is the error mechanism**, thrown from eight places: the
+  big-endian readers, the name codec's loop and bounds checks, the header and
+  record parsers, and `syncCounts`. Every parse function throws; none of them
+  returns an error code.
 - **Constants are `constexpr` and owned by the layer that uses them.** `kMaxDatagramSize`
   in `net/socket.hpp`, `kLocalZoneAddress` in `resolver/local_override.hpp`, and so on.
   There are no mutable globals. `UpstreamConfig` is a parameter, not a file-scope
@@ -157,8 +163,8 @@ ss -ulnp | grep 2053
 
 ## Not on the course — do not add
 
-The course was trimmed to 8 stages. These are **not** on it and adding them is
-scope creep: TCP DNS (the 2-byte length prefix and the connection), multiple A records
+The course is 8 stages and none of these are on it, so adding them is scope
+creep: TCP DNS (the 2-byte length prefix and the connection), multiple A records
 for one name, `ANY` queries, `AAAA`/IPv6 records. AAAA records are parsed and relayed
 like any other RR type, but there is no IPv6-specific handling and none is required.
 

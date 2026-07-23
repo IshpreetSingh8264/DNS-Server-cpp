@@ -2,7 +2,8 @@
 
 A UDP DNS forwarder built for the
 [CodeCrafters DNS server course](https://app.codecrafters.io/courses/dns-server/overview).
-C++23, CMake, no third-party dependencies. `codecrafters test` reports 8/8.
+C++23, CMake, no third-party dependencies. All 8 stages of the course are implemented;
+run `codecrafters test` to confirm the pass status.
 
 Read `docs/ARCHITECTURE.md` for the full module map and data flow. This file is the
 short version plus the things that are easy to get wrong.
@@ -36,12 +37,13 @@ stage pass while concealing a real bug in compression-pointer parsing.
 | `src/utils/` | leaf helpers, no DNS knowledge | nothing |
 
 `main.cpp` is 90 lines and must stay under 200. No file may exceed 600 lines. The
-largest here is `types/message.hpp` at 89.
+largest here is `resolver/multiquery.cpp` at 97.
 
 ## Conventions
 
 - `namespace dns` on everything. Every `.hpp` has a matching `.cpp` — no header-only
-  modules, no inline definitions outside `types/message.hpp`.
+  modules. `inline constexpr` data is confined to `types/message.hpp`,
+  `net/socket.hpp`, and `resolver/local_override.hpp`.
 - No mutable globals. Config travels as a parameter (`UpstreamConfig`).
 - `DnsPacket::syncCounts()` derives the four count fields from the four section
   vectors. Do not assign them by hand; a count that disagrees with its vector is a
